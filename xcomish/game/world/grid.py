@@ -60,3 +60,10 @@ class Grid:
         xs, ys = camera.world_to_screen(xw, yw)
         rect = pygame.Rect(xs, ys, self.tile_size, self.tile_size)
         pygame.draw.rect(surface, settings.GRID_HILITE, rect, width=2)
+
+    # Add at bottom of class Grid:
+    def tile_rect_screen(self, camera, col: int, row: int) -> pygame.Rect:
+        xw, yw = self.to_px(col, row)
+        xs, ys = camera.world_to_screen(xw, yw)
+        return pygame.Rect(xs, ys, self.tile_size, self.tile_size)
+

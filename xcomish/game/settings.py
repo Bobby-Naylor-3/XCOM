@@ -34,3 +34,13 @@ BG_COLOR: tuple[int, int, int] = (15, 15, 20)
 GRID_COLOR: tuple[int, int, int] = (45, 45, 60)
 GRID_HILITE: tuple[int, int, int] = (70, 70, 100)
 PLAYER_COLOR: tuple[int, int, int] = (220, 220, 40)
+
+# Movement (tiles)
+MOVE_RANGE_1: int = 8     # one action
+MOVE_RANGE_2: int = 16    # dash (two actions)
+
+# Overlay colors (RGBA for semi-transparency)
+RANGE1_RGBA: tuple[int, int, int, int] = (0, 255, 255, 70)   # cyan
+RANGE2_RGBA: tuple[int, int, int, int] = (255, 255, 0, 50)   # yellow
+PATH_RGBA:   tuple[int, int, int, int] = (255, 255, 255, 220)
+SEL_RGBA:    tuple[int, int, int, int] = (0, 200, 255, 200)  # selection ring
