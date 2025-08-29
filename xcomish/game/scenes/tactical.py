@@ -13,7 +13,7 @@ Coord = tuple[int, int]
 
 @dataclass
 class TacticalScene:
-    """Tactical layer: world grid + player + camera pan + selection/range preview."""
+    """Tactical layer: world grid + player + camera pan + selection/range + plan click."""
     screen: pygame.Surface
     grid: Grid = field(default_factory=Grid)
     player: Player = field(init=False)
@@ -29,6 +29,11 @@ class TacticalScene:
     _range_costs: dict[Coord, int] = field(default_factory=dict, init=False)
     _range_parents: dict[Coord, Coord] = field(default_factory=dict, init=False)
 
+    # planned destination (no movement yet)
+    _planned_target: Coord | None = field(default=None, init=False)
+    _planned_path: list[Coord] = field(default_factory=list, init=False)
+    _planned_actions: int | None = field(default=None, init=False)
+
     def __post_init__(self) -> None:
         self.player = Player(self.grid)
         world_w = self.grid.cols * self.grid.tile_size
@@ -39,6 +44,9 @@ class TacticalScene:
         # Start centered on the player
         px, py = self.grid.center_px(self.player.col, self.player.row)
         self.camera.center_on_px(px, py)
+
+        # font
+        self._font = pygame.font.Font(None, settings.HUD_FONT_SIZE)
 
     # ---- Input ----
     def handle_event(self, event: pygame.event.Event) -> None:
@@ -63,16 +71,31 @@ class TacticalScene:
             dx, dy = (mx - sx), (my - sy)
             self.camera.set_offset(ox0 - dx, oy0 - dy)
 
-        # Left-click selects player (or deselect if anywhere else)
+        # Left-click: select or set plan
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             world_x, world_y = self.camera.screen_to_world(*event.pos)
             col, row = self.grid.from_px(world_x, world_y)
+
+            # Click on player: toggle selection and clear plan
             if (col, row) == (self.player.col, self.player.row):
-                self._selected = True
-                self._compute_ranges()
+                if not self._selected:
+                    self._selected = True
+                    self._compute_ranges()
+                else:
+                    # deselect
+                    self._selected = False
+                    self._range_costs.clear()
+                    self._range_parents.clear()
+                    self._clear_plan()
+                return
+
+            # If selected: try to commit a plan to the clicked tile
+            if self._selected and self._range_costs:
+                self._try_set_plan((col, row))
             else:
-                # click elsewhere: just deselect for now (no move yet)
+                # click elsewhere w/o selection: nothing (or you could deselect)
                 self._selected = False
+                self._clear_plan()
                 self._range_costs.clear()
                 self._range_parents.clear()
 
@@ -80,10 +103,41 @@ class TacticalScene:
         start: Coord = (self.player.col, self.player.row)
 
         def passable(c: int, r: int) -> bool:
-            return self.grid.in_bounds(c, r)  # later: check obstacles, units, etc.
+            return self.grid.in_bounds(c, r)  # later: add obstacles/units/etc.
 
         max_cost = settings.MOVE_RANGE_2
         self._range_costs, self._range_parents = flood_fill(start, passable, max_cost)
+
+    def _actions_for_cost(self, cost: int | None) -> int | None:
+        if cost is None:
+            return None
+        if cost <= settings.MOVE_RANGE_1:
+            return 1
+        if cost <= settings.MOVE_RANGE_2:
+            return 2
+        return None
+
+    def _try_set_plan(self, target: Coord) -> None:
+        cost = self._range_costs.get(target)
+        actions = self._actions_for_cost(cost)
+        if actions is None:
+            # unreachable → clear plan (you clicked outside range)
+            self._clear_plan()
+            return
+
+        path = reconstruct_path(target, self._range_parents)
+        if not path:
+            self._clear_plan()
+            return
+
+        self._planned_target = target
+        self._planned_path = path
+        self._planned_actions = actions
+
+    def _clear_plan(self) -> None:
+        self._planned_target = None
+        self._planned_path.clear()
+        self._planned_actions = None
 
     # ---- Fixed update ----
     def update(self, dt: float) -> None:
@@ -102,7 +156,7 @@ class TacticalScene:
         surface.fill(settings.BG_COLOR)
         self.grid.draw_lines(surface, self.camera)
 
-        # Range overlays (under units)
+        # Range overlays
         if self._selected and self._range_costs:
             self._draw_range_overlays(surface)
 
@@ -111,29 +165,32 @@ class TacticalScene:
         if self._selected:
             self.player.draw_selected(surface, self.camera, alpha=alpha)
 
-        # Hover path (on top)
+        # Planned path (persistent)
+        if self._selected and self._planned_path:
+            self._draw_planned_path(surface)
+
+        # Hover path (ephemeral, drawn last so it’s on top)
         if self._selected and self._range_costs:
             self._draw_hover_path(surface)
 
         # Mouse tile highlight last
         self.grid.draw_highlight(surface, self.camera, pygame.mouse.get_pos())
 
+        # HUD readout: show planned actions if any; else show hover actions if reachable
+        self._draw_action_hud(surface)
+
     # ---- Overlay helpers ----
     def _draw_range_overlays(self, surface: pygame.Surface) -> None:
         sw, sh = surface.get_size()
         overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
 
-        # Draw cyan for <= MOVE_RANGE_1, yellow for (MOVE_RANGE_1, MOVE_RANGE_2]
         for (c, r), cost in self._range_costs.items():
             rect = self.grid.tile_rect_screen(self.camera, c, r)
             if not rect.colliderect(pygame.Rect(0, 0, sw, sh)):
                 continue
-            if cost <= settings.MOVE_RANGE_1:
-                overlay.fill(settings_RANGE1 := settings.RANGE1_RGBA, rect)
-            else:
-                overlay.fill(settings_RANGE2 := settings.RANGE2_RGBA, rect)
+            overlay.fill(settings.RANGE1_RGBA if cost <= settings.MOVE_RANGE_1 else settings.RANGE2_RGBA, rect)
 
-        # Don't tint the player's own tile (optional)
+        # Don't tint the player's own tile
         p_rect = self.grid.tile_rect_screen(self.camera, self.player.col, self.player.row)
         overlay.fill((0, 0, 0, 0), p_rect)
 
@@ -145,27 +202,67 @@ class TacticalScene:
         tc, tr = self.grid.from_px(wx, wy)
 
         cost = self._range_costs.get((tc, tr))
-        if cost is None or cost > settings.MOVE_RANGE_2:
-            return  # not reachable
+        actions = self._actions_for_cost(cost)
+        if actions is None:
+            return
 
         path = reconstruct_path((tc, tr), self._range_parents)
         if not path:
             return
 
-        # Convert centers to screen pixels
-        pts: list[tuple[int, int]] = []
-        for c, r in path:
-            cx_w, cy_w = self.grid.center_px(c, r)
-            cx_s, cy_s = self.camera.world_to_screen(cx_w, cy_w)
-            pts.append((cx_s, cy_s))
-
-        # Draw a thick polyline
         overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+
+        # polyline
+        pts = [self.camera.world_to_screen(*self.grid.center_px(c, r)) for c, r in path]
         if len(pts) >= 2:
             pygame.draw.lines(overlay, settings.PATH_RGBA, False, pts, width=6)
 
-        # Emphasize hovered target tile
+        # target emph
         tgt_rect = self.grid.tile_rect_screen(self.camera, tc, tr)
         pygame.draw.rect(overlay, settings.PATH_RGBA, tgt_rect, width=3)
 
         surface.blit(overlay, (0, 0))
+
+    def _draw_planned_path(self, surface: pygame.Surface) -> None:
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        pts = [self.camera.world_to_screen(*self.grid.center_px(c, r)) for c, r in self._planned_path]
+        if len(pts) >= 2:
+            pygame.draw.lines(overlay, settings.PLAN_RGBA, False, pts, width=8)
+        # target box
+        tc, tr = self._planned_target  # type: ignore
+        tgt_rect = self.grid.tile_rect_screen(self.camera, tc, tr)
+        pygame.draw.rect(overlay, settings.PLAN_RGBA, tgt_rect, width=4)
+        surface.blit(overlay, (0, 0))
+
+    def _draw_action_hud(self, surface: pygame.Surface) -> None:
+        text = None
+
+        # Prefer planned readout
+        if self._planned_actions is not None and self._planned_target is not None:
+            steps = len(self._planned_path) - 1
+            if self._planned_actions == 1:
+                text = f"Planned: 1 Action · {steps} tiles"
+            else:
+                text = f"Planned: 2 Actions (Dash) · {steps} tiles"
+        else:
+            # Otherwise show hover readout if reachable
+            mx, my = pygame.mouse.get_pos()
+            wx, wy = self.camera.screen_to_world(mx, my)
+            tc, tr = self.grid.from_px(wx, wy)
+            cost = self._range_costs.get((tc, tr))
+            actions = self._actions_for_cost(cost)
+            if actions is not None:
+                steps = cost or 0
+                text = f"Hover: {'1 Action' if actions == 1 else '2 Actions (Dash)'} · {steps} tiles"
+
+        if not text:
+            return
+
+        # Draw a simple pill in top-left
+        pad = 8
+        surf_text = self._font.render(text, True, settings.HUD_TEXT_RGB)
+        w, h = surf_text.get_size()
+        pill = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
+        pill.fill(settings.HUD_BG_RGBA)
+        pill.blit(surf_text, (pad, pad))
+        surface.blit(pill, (10, 10))
