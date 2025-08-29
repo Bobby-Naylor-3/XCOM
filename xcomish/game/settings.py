@@ -84,3 +84,21 @@ LOF_BLOCKED_RGBA: tuple[int, int, int, int] = (255, 60, 60, 180)
 SIGHT_RADIUS_TILES: int = 12
 FOG_SOFT_RGBA: tuple[int, int, int, int] = (0, 0, 0, 140)  # explored-not-visible
 FOG_HARD_RGBA: tuple[int, int, int, int] = (0, 0, 0, 220)  # never seen
+
+# --- Combat / Aim ---
+BASE_AIM_PERCENT: int = 65          # soldier's base aim
+HIT_CLAMP_MIN: int = 5
+HIT_CLAMP_MAX: int = 95
+
+# Cover modifiers (to shooter's aim)
+COVER_HALF_PENALTY: int = -20
+COVER_FULL_PENALTY: int = -40
+FLANK_BONUS: int = +30              # granted when target is flanked (cover side not facing shooter)
+
+# Range bands (euclidean tiles). Each = (min_inclusive, max_exclusive, modifier)
+RANGE_BANDS: list[tuple[float, float, int]] = [
+    (0.0, 2.0, +10),   # point-blank nudge
+    (2.0, 8.0, 0),     # optimal
+    (8.0, 12.0, -10),  # far
+    (12.0, 999.0, -25) # extreme
+]
