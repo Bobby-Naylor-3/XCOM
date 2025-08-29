@@ -50,3 +50,9 @@ SEL_RGBA:    tuple[int, int, int, int] = (0, 200, 255, 200)   # selection ring
 HUD_BG_RGBA: tuple[int, int, int, int] = (0, 0, 0, 150)
 HUD_TEXT_RGB: tuple[int, int, int] = (240, 240, 240)
 HUD_FONT_SIZE: int = 20
+
+# Turn / actions
+ACTIONS_PER_TURN: int = 2
+
+# Movement speed (tiles per second)
+PLAYER_MOVE_SPEED_TPS: float = 8.0
