@@ -3,18 +3,23 @@ from __future__ import annotations
 import math
 import pygame
 from dataclasses import dataclass, field
+from typing import Optional
+
 from game import settings
 from game.world.grid import Grid
 from game.world.camera import Camera2D
 from game.entities.player import Player
+from game.entities.enemy import Enemy
 from game.world.pathing import flood_fill, reconstruct_path
 from game.world.cover import compute_tile_cover, cover_to_label
+from game.world.los import los_clear, facing_side, Coord
+from game.world.fog import compute_visible
 
 Coord = tuple[int, int]
 
 @dataclass
 class TacticalScene:
-    """Tactical layer: select, plan, confirm moves, obstacles, and cover preview."""
+    """Tactical layer: select, plan, confirm moves, obstacles, cover, LoF/flanking, and fog of war."""
     screen: pygame.Surface
     grid: Grid = field(default_factory=Grid)
     player: Player = field(init=False)
@@ -35,8 +40,16 @@ class TacticalScene:
     _planned_path: list[Coord] = field(default_factory=list, init=False)
     _planned_actions: int | None = field(default=None, init=False)
 
-    # obstacle edit mode
+    # edit modes
     _obstacle_edit: bool = field(default=False, init=False)
+    _enemy_edit: bool = field(default=False, init=False)
+
+    # enemies indexed by tile
+    _enemies: dict[Coord, Enemy] = field(default_factory=dict, init=False)
+
+    # fog
+    _visible: set[Coord] = field(default_factory=set, init=False)
+    _explored: set[Coord] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self.player = Player(self.grid)
@@ -50,6 +63,7 @@ class TacticalScene:
         self.camera.center_on_px(px, py)
 
         self._font = pygame.font.Font(None, settings.HUD_FONT_SIZE)
+        self._recompute_visibility()
 
     # ---- Input ----
     def handle_event(self, event: pygame.event.Event) -> None:
@@ -57,13 +71,20 @@ class TacticalScene:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             pygame.event.post(pygame.event.Event(pygame.QUIT))
 
-        # toggle obstacle edit
+        # modes
         if event.type == pygame.KEYDOWN and event.key == pygame.K_o:
             mods = pygame.key.get_mods()
             if mods & pygame.KMOD_SHIFT:
                 self._seed_demo_obstacles()
             else:
                 self._obstacle_edit = not self._obstacle_edit
+                if self._obstacle_edit:
+                    self._enemy_edit = False  # one editor at a time
+
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_e:
+            self._enemy_edit = not self._enemy_edit
+            if self._enemy_edit:
+                self._obstacle_edit = False
 
         # new turn for testing
         if event.type == pygame.KEYDOWN and event.key == pygame.K_n:
@@ -98,18 +119,30 @@ class TacticalScene:
             dx, dy = (mx - sx), (my - sy)
             self.camera.set_offset(ox0 - dx, oy0 - dy)
 
-        # left-click
+        # left-click – editor modes take priority
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not self.player.is_moving():
             world_x, world_y = self.camera.screen_to_world(*event.pos)
             col, row = self.grid.from_px(world_x, world_y)
 
             if self._obstacle_edit:
-                if (col, row) != (self.player.col, self.player.row):
+                if (col, row) != (self.player.col, self.player.row) and (col, row) not in self._enemies:
                     self.grid.toggle_obstacle(col, row)
                     if self._selected:
                         self._compute_ranges(force=True)
+                    self._recompute_visibility()
                 return
 
+            if self._enemy_edit:
+                # toggle enemy at tile (can’t overlap player or wall)
+                if (col, row) != (self.player.col, self.player.row) and self.grid.is_passable(col, row):
+                    key = (col, row)
+                    if key in self._enemies:
+                        del self._enemies[key]
+                    else:
+                        self._enemies[key] = Enemy(self.grid, col, row)
+                return
+
+            # selection / planning
             if (col, row) == (self.player.col, self.player.row):
                 if not self._selected:
                     self._selected = True
@@ -134,7 +167,7 @@ class TacticalScene:
         start: Coord = (self.player.col, self.player.row)
 
         def passable(c: int, r: int) -> bool:
-            return self.grid.is_passable(c, r)
+            return self.grid.is_passable(c, r) and ((c, r) not in self._enemies)  # units block tiles later
 
         if self.player.actions_remaining <= 0:
             self._range_costs, self._range_parents = {start: 0}, {}
@@ -152,7 +185,7 @@ class TacticalScene:
         return None
 
     def _try_set_plan(self, target: Coord) -> None:
-        if not self.grid.is_passable(*target):
+        if not self.grid.is_passable(*target) or target in self._enemies:
             self._clear_plan()
             return
         cost = self._range_costs.get(target)
@@ -181,6 +214,12 @@ class TacticalScene:
         self.player.actions_remaining -= self._planned_actions
         self.player.start_move(self._planned_path, settings.PLAYER_MOVE_SPEED_TPS)
 
+    # ---- Fog / visibility ----
+    def _recompute_visibility(self) -> None:
+        origin = (self.player.col, self.player.row)
+        self._visible = compute_visible(self.grid, origin, settings.SIGHT_RADIUS_TILES)
+        self._explored |= self._visible
+
     # ---- Fixed update ----
     def update(self, dt: float) -> None:
         # camera pan
@@ -194,6 +233,7 @@ class TacticalScene:
             self.camera.move(nx * speed * dt, ny * speed * dt)
 
         # update movement
+        old_pos = (self.player.col, self.player.row)
         was_moving = self.player.is_moving()
         self.player.update(dt)
         now_moving = self.player.is_moving()
@@ -201,6 +241,9 @@ class TacticalScene:
             self._clear_plan()
             if self._selected:
                 self._compute_ranges()
+        # Update FoW if position changed or every tick (cheap enough)
+        if (self.player.col, self.player.row) != old_pos or was_moving:
+            self._recompute_visibility()
 
     # ---- Render ----
     def draw(self, surface: pygame.Surface, alpha: float) -> None:
@@ -212,16 +255,18 @@ class TacticalScene:
         if self._selected and self._range_costs and not self.player.is_moving():
             self._draw_range_overlays(surface)
 
-        # player
+        # units
+        # draw enemies first so player ring sits above
+        for enemy in self._enemies.values():
+            enemy.draw(surface, self.camera)
+
         self.player.draw(surface, self.camera, alpha=alpha)
         if self._selected:
             self.player.draw_selected(surface, self.camera, alpha=alpha)
 
-        # planned path
+        # planned/hover path
         if self._selected and self._planned_path and not self.player.is_moving():
             self._draw_planned_path(surface)
-
-        # hover path
         if self._selected and self._range_costs and not self.player.is_moving():
             self._draw_hover_path(surface)
 
@@ -238,13 +283,19 @@ class TacticalScene:
             if (hc, hr) in self._range_costs and not self.player.is_moving():
                 self._draw_cover_pips(surface, hc, hr, focused=True)
 
-        # mouse tile highlight
+        # LoF / Flank preview vs hovered enemy (if visible)
+        self._draw_lof_overlay(surface)
+
+        # Fog (draw late so it properly hides unseen)
+        self._draw_fog(surface)
+
+        # mouse tile highlight (on top of fog for UX)
         self.grid.draw_highlight(surface, self.camera, pygame.mouse.get_pos())
 
         # HUD
-        self._draw_action_hud(surface)
+        self._draw_hud(surface)
 
-    # ---- Overlay helpers ----
+    # ---- Overlays ----
     def _draw_range_overlays(self, surface: pygame.Surface) -> None:
         sw, sh = surface.get_size()
         overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
@@ -253,7 +304,6 @@ class TacticalScene:
             if not rect.colliderect(pygame.Rect(0, 0, sw, sh)):
                 continue
             overlay.fill(settings.RANGE1_RGBA if cost <= settings.MOVE_RANGE_1 else settings.RANGE2_RGBA, rect)
-        # don't tint current tile
         p_rect = self.grid.tile_rect_screen(self.camera, self.player.col, self.player.row)
         overlay.fill((0, 0, 0, 0), p_rect)
         surface.blit(overlay, (0, 0))
@@ -292,16 +342,46 @@ class TacticalScene:
         # Always show cover pips for the player's *current* tile (dimmed).
         self._draw_cover_pips(surface, self.player.col, self.player.row, focused=False)
 
+    # ---- LoF / Flanking ----
+    def _enemy_under_mouse(self) -> Optional[Enemy]:
+        mx, my = pygame.mouse.get_pos()
+        wx, wy = self.camera.screen_to_world(mx, my)
+        c, r = self.grid.from_px(wx, wy)
+        return self._enemies.get((c, r))
+
+    def _draw_lof_overlay(self, surface: pygame.Surface) -> None:
+        enemy = self._enemy_under_mouse()
+        if not enemy:
+            return
+        tgt = (enemy.col, enemy.row)
+        # Only preview if tile is visible to player
+        if tgt not in self._visible:
+            return
+
+        shooter = (self.player.col, self.player.row)
+        has_los = los_clear(self.grid, shooter, tgt)
+
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        sx, sy = self.camera.world_to_screen(*self.grid.center_px(*shooter))
+        tx, ty = self.camera.world_to_screen(*self.grid.center_px(*tgt))
+        color = settings.LOF_CLEAR_RGBA if has_los else settings.LOF_BLOCKED_RGBA
+        pygame.draw.line(overlay, color, (sx, sy), (tx, ty), width=4)
+
+        # Draw target cover pips bright for context
+        self._draw_cover_pips(surface, enemy.col, enemy.row, focused=True)
+
+        surface.blit(overlay, (0, 0))
+
+    # ---- Cover drawing (reuse from cover step) ----
     def _draw_cover_pips(self, surface: pygame.Surface, col: int, row: int, *, focused: bool) -> None:
+        from game.world.cover import compute_tile_cover  # local import to avoid cycle
         cv = compute_tile_cover(self.grid, col, row, oob_is_full=settings.COVER_OOB_IS_FULL)
         rect = self.grid.tile_rect_screen(self.camera, col, row)
         if not rect.colliderect(surface.get_rect()):
             return
 
-        # Colors
         full = settings.COVER_FULL_RGB if focused else settings.COVER_DIM_RGB
         half = settings.COVER_HALF_RGB if focused else settings.COVER_DIM_RGB
-
         alpha = settings.COVER_ALPHA
         overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
 
@@ -318,60 +398,91 @@ class TacticalScene:
         def poly_left():
             return [(x + m, y + m), (x + m, y + h - m), (x + m + t, y + h - m - t), (x + m + t, y + m + t)]
 
+        from game.world.cover import compute_tile_cover
+        cv = compute_tile_cover(self.grid, col, row, oob_is_full=settings.COVER_OOB_IS_FULL)
         for side, poly_fn in (("N", poly_top), ("E", poly_right), ("S", poly_bottom), ("W", poly_left)):
             k = cv[side]
             if k == "none":
                 continue
             color = full if k == "full" else half
-            # draw filled polygon with alpha
             pygame.draw.polygon(overlay, (*color, alpha), poly_fn())
 
         surface.blit(overlay, (0, 0))
 
+    # ---- Fog ----
+    def _draw_fog(self, surface: pygame.Surface) -> None:
+        sw, sh = surface.get_size()
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+
+        ts = self.grid.tile_size
+        ox, oy = self.camera.offset_x, self.camera.offset_y
+        first_c = max(0, int(ox // ts))
+        last_c  = min(self.grid.cols, int((ox + sw) // ts) + 1)
+        first_r = max(0, int(oy // ts))
+        last_r  = min(self.grid.rows, int((oy + sh) // ts) + 1)
+
+        for c in range(first_c, last_c):
+            for r in range(first_r, last_r):
+                rect = self.grid.tile_rect_screen(self.camera, c, r)
+                if (c, r) in self._visible:
+                    continue
+                rgba = settings.FOG_SOFT_RGBA if (c, r) in self._explored else settings.FOG_HARD_RGBA
+                overlay.fill(rgba, rect)
+
+        surface.blit(overlay, (0, 0))
+
     # ---- HUD ----
-    def _draw_action_hud(self, surface: pygame.Surface) -> None:
-        # base actions
-        text = f"Actions: {self.player.actions_remaining}/{settings.ACTIONS_PER_TURN}"
-
-        # Plan / hover info
-        extra = None
+    def _draw_hud(self, surface: pygame.Surface) -> None:
+        # Base actions & modes
+        pieces = [f"Actions: {self.player.actions_remaining}/{settings.ACTIONS_PER_TURN}"]
         if self._obstacle_edit:
-            extra = "Obstacle Edit Mode (O toggle, Shift+O demo) | LMB: toggle"
-        elif not self.player.is_moving():
-            # Cover here
-            here_cv = compute_tile_cover(self.grid, self.player.col, self.player.row, oob_is_full=settings.COVER_OOB_IS_FULL)
-            here_s = cover_to_label(here_cv)
-            pieces = [f"Cover(Here): {here_s}"]
+            pieces.append("Obstacle Edit (O) | Shift+O demo | LMB toggle")
+        if self._enemy_edit:
+            pieces.append("Enemy Edit (E) | LMB add/remove")
 
+        # Plan/hover info + cover here
+        from game.world.cover import compute_tile_cover, cover_to_label
+        here_cv = compute_tile_cover(self.grid, self.player.col, self.player.row, oob_is_full=settings.COVER_OOB_IS_FULL)
+        pieces.append(f"Cover(Here): {cover_to_label(here_cv)}")
+
+        if not self.player.is_moving():
             # Planned
             if self._planned_actions is not None and self._planned_path:
                 steps = max(0, len(self._planned_path) - 1)
                 pieces.append(f"Planned: {'1A' if self._planned_actions == 1 else '2A Dash'} · {steps} tiles")
-                pc, pr = self._planned_target  # type: ignore
-                pcv = compute_tile_cover(self.grid, pc, pr, oob_is_full=settings.COVER_OOB_IS_FULL)
-                pieces.append(f"Cover(Planned): {cover_to_label(pcv)}")
-            else:
-                # Hover reachability + cover
-                mx, my = pygame.mouse.get_pos()
-                wx, wy = self.camera.screen_to_world(mx, my)
-                tc, tr = self.grid.from_px(wx, wy)
-                cost = self._range_costs.get((tc, tr))
-                actions = self._actions_for_cost(cost)
-                if actions is not None:
-                    pieces.append(f"Hover: {'1A' if actions == 1 else '2A Dash'} · {cost} tiles")
-                    hcv = compute_tile_cover(self.grid, tc, tr, oob_is_full=settings.COVER_OOB_IS_FULL)
-                    pieces.append(f"Cover(Hover): {cover_to_label(hcv)}")
 
-            extra = " | ".join(pieces)
+            # Hover reachability
+            mx, my = pygame.mouse.get_pos()
+            wx, wy = self.camera.screen_to_world(mx, my)
+            tc, tr = self.grid.from_px(wx, wy)
+            cost = self._range_costs.get((tc, tr))
+            actions = self._actions_for_cost(cost)
+            if actions is not None:
+                pieces.append(f"Hover: {'1A' if actions == 1 else '2A Dash'} · {cost} tiles")
 
-        if extra:
-            text = f"{text}    |    {extra}"
+            # LoF vs hovered enemy
+            enemy = self._enemy_under_mouse()
+            if enemy and (enemy.col, enemy.row) in self._visible:
+                shooter = (self.player.col, self.player.row)
+                target = (enemy.col, enemy.row)
+                has_los = los_clear(self.grid, shooter, target)
+                side = facing_side(shooter, target)
+                tcv = compute_tile_cover(self.grid, enemy.col, enemy.row, oob_is_full=settings.COVER_OOB_IS_FULL)
+                cover_facing = tcv[side]
+                flanked = has_los and (cover_facing == "none")
+                dist = abs(target[0] - shooter[0]) + abs(target[1] - shooter[1])
+                pieces.append(f"LoF: {'Yes' if has_los else 'No'} | Flanked: {'Yes' if flanked else 'No'} | TargetCoverSide({side}): {'None' if cover_facing=='none' else ('Half' if cover_facing=='half' else 'Full')} | Dist: {dist}")
 
+        # Render pill
+        text = "  |  ".join(pieces)
         pad = 8
         surf_text = self._font.render(text, True, settings.HUD_TEXT_RGB)
         w, h = surf_text.get_size()
         pill = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
-        pill.fill(settings.HUD_BG_RGBA if not self._obstacle_edit else settings.OBSTACLE_EDIT_HINT_RGBA)
+        # tint different when editing
+        from game import settings as S
+        tint = S.OBSTACLE_EDIT_HINT_RGBA if self._obstacle_edit or self._enemy_edit else S.HUD_BG_RGBA
+        pill.fill(tint)
         pill.blit(surf_text, (pad, pad))
         surface.blit(pill, (10, 10))
 
@@ -382,7 +493,8 @@ class TacticalScene:
         for i in range(length):
             c = base_c + i
             r = base_r + (i % 2)
-            if self.grid.in_bounds(c, r) and (c, r) != (self.player.col, self.player.row):
+            if self.grid.in_bounds(c, r) and (c, r) != (self.player.col, self.player.row) and (c, r) not in self._enemies:
                 self.grid.blocked.add((c, r))
         if self._selected:
             self._compute_ranges(force=True)
+        self._recompute_visibility()

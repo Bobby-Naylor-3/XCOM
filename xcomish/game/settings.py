@@ -72,3 +72,15 @@ COVER_ALPHA:    int = 220
 COVER_MARGIN:   int = 6     # inset from tile edge (px)
 COVER_THICK:    int = 6     # thickness of the pip polygon (px)
 COVER_OOB_IS_FULL: bool = True  # treat map edge as full cover on that side
+
+# Enemies
+ENEMY_COLOR: tuple[int, int, int] = (220, 60, 60)
+
+# Line of Fire overlay
+LOF_CLEAR_RGBA: tuple[int, int, int, int]  = (0, 255, 0, 180)
+LOF_BLOCKED_RGBA: tuple[int, int, int, int] = (255, 60, 60, 180)
+
+# Fog of War
+SIGHT_RADIUS_TILES: int = 12
+FOG_SOFT_RGBA: tuple[int, int, int, int] = (0, 0, 0, 140)  # explored-not-visible
+FOG_HARD_RGBA: tuple[int, int, int, int] = (0, 0, 0, 220)  # never seen
