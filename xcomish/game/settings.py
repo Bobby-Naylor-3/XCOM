@@ -102,3 +102,24 @@ RANGE_BANDS: list[tuple[float, float, int]] = [
     (8.0, 12.0, -10),  # far
     (12.0, 999.0, -25) # extreme
 ]
+
+# --- Combat / Aim (existing from last step is fine) ---
+# BASE_AIM_PERCENT, HIT_CLAMP_MIN/MAX, COVER_* penalties, FLANK_BONUS, RANGE_BANDS
+
+# --- Combat / Crit & Graze ---
+BASE_CRIT_PERCENT: int = 10
+CRIT_HALF_COVER_PENALTY: int = -10
+CRIT_FULL_COVER_PENALTY: int = -25
+CRIT_FLANK_BONUS: int = +20
+CRIT_POINT_BLANK_BONUS: int = +15   # distance < 2 tiles
+
+GRAZE_BAND_PERCENT: int = 20        # band above hit% that counts as graze instead of a full miss
+
+# --- Damage model ---
+DAMAGE_BASE_MIN: int = 3
+DAMAGE_BASE_MAX: int = 5
+CRIT_BONUS_DAMAGE: int = 2          # added to rolled base on crit
+GRAZE_MULTIPLIER: float = 0.5       # graze does 50% (min 1 dmg if >0 base)
+
+# --- RNG (optional seed; None = random) ---
+RNG_SEED: int | None = None
