@@ -123,3 +123,7 @@ GRAZE_MULTIPLIER: float = 0.5       # graze does 50% (min 1 dmg if >0 base)
 
 # --- RNG (optional seed; None = random) ---
 RNG_SEED: int | None = None
+
+# --- Actions for combat ---
+FIRE_ACTION_COST: int = 1
+RELOAD_ACTION_COST: int = 1

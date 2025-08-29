@@ -1,7 +1,7 @@
 # game/combat/hit.py
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Iterable, Optional
 import math
 
 from game import settings as S
@@ -15,15 +15,15 @@ class HitBreakdown:
     total: int = 0
     los: bool = False
     flanked: bool = False
-    cover_type: str = "none"   # "none"|"half"|"full"
+    cover_type: str = "none"
     distance_tiles: float = 0.0
 
     def as_text(self) -> str:
         pieces = [f"{self.base} base"] + [f"{'+' if v>=0 else ''}{v} {k}" for k, v in self.terms]
         return f"{self.total}%  (" + ", ".join(pieces) + ")"
 
-def _range_modifier(dist_tiles: float) -> int:
-    for lo, hi, mod in S.RANGE_BANDS:
+def _range_modifier(dist_tiles: float, range_bands: list[tuple[float, float, int]]) -> int:
+    for lo, hi, mod in range_bands:
         if lo <= dist_tiles < hi:
             return mod
     return 0
@@ -31,7 +31,14 @@ def _range_modifier(dist_tiles: float) -> int:
 def clamp(p: int) -> int:
     return max(S.HIT_CLAMP_MIN, min(S.HIT_CLAMP_MAX, p))
 
-def compute_hit(grid, shooter: Coord, target: Coord, *, base_aim: int | None = None) -> HitBreakdown:
+def compute_hit(
+    grid,
+    shooter: Coord,
+    target: Coord,
+    *,
+    base_aim: int | None = None,
+    range_bands: list[tuple[float, float, int]] | None = None
+) -> HitBreakdown:
     """Return a full hit breakdown from shooter->target."""
     base = int(S.BASE_AIM_PERCENT if base_aim is None else base_aim)
     dx = target[0] - shooter[0]
@@ -57,7 +64,8 @@ def compute_hit(grid, shooter: Coord, target: Coord, *, base_aim: int | None = N
     total = base
 
     # Range
-    rng = _range_modifier(dist)
+    rb = range_bands if range_bands is not None else S.RANGE_BANDS
+    rng = _range_modifier(dist, rb)
     if rng:
         bd.terms.append(("range", rng))
         total += rng

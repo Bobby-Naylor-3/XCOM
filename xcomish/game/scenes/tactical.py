@@ -1,4 +1,4 @@
-# game/scenes/tactical.py (merged)
+# game/scenes/tactical.py (conjoined merge of old+new)
 from __future__ import annotations
 import math, random
 import pygame
@@ -16,18 +16,20 @@ from game.world.los import los_clear, facing_side, Coord
 from game.world.fog import compute_visible
 from game.combat.hit import compute_hit
 from game.combat.resolve import preview_probabilities, resolve_shot
-
+from game.combat.weapons import make_weapon, Weapon
 
 @dataclass
 class TacticalScene:
     """
-    Tactical layer:
-    - Selection, planning, and confirming moves
-    - Obstacles editor + demo seeding (Shift+O)
-    - Enemy placement editor
-    - Cover (pips + labels), LoF/Flanking, distance
-    - Fog of war (visible vs explored)
-    - Shot preview (hit/crit/graze/damage) and F to fire with RNG-backed resolution
+    Tactical layer (merged):
+      - Selection / planning / confirm moves
+      - Obstacle editor (O) + demo seeding (Shift+O)
+      - Enemy placement editor (E)
+      - Cover pips + labels, LoF line, Flanking readouts, distance
+      - Fog of war (visible vs explored)
+      - Weaponized combat: F to fire (action+ammo), R to reload (action)
+      - HUD: actions, weapon ammo, cover(Here), plan/hover cost, LoF/Flank/Dist,
+             compute_hit terms, weapon-aware damage preview, last-shot result
     """
     screen: pygame.Surface
     grid: Grid = field(default_factory=Grid)
@@ -64,6 +66,9 @@ class TacticalScene:
     _rng: random.Random = field(default_factory=random.Random, init=False)
     _last_shot_text: str | None = field(default=None, init=False)
 
+    # weapon system
+    weapon: Weapon = field(init=False)
+
     def __post_init__(self) -> None:
         self.player = Player(self.grid)
         world_w = self.grid.cols * self.grid.tile_size
@@ -75,9 +80,9 @@ class TacticalScene:
         px, py = self.grid.center_px(self.player.col, self.player.row)
         self.camera.center_on_px(px, py)
 
+        self.weapon = make_weapon("assault_rifle")  # swap to "shotgun" to feel the difference
         self._font = pygame.font.Font(None, settings.HUD_FONT_SIZE)
-        # RNG seed (optional)
-        self._rng = random.Random(settings.RNG_SEED) if settings.RNG_SEED is not None else random.Random()
+        self._rng = random.Random(settings.RNG_SEED) if getattr(settings, "RNG_SEED", None) is not None else random.Random()
         self._recompute_visibility()
 
     # ---- Input ----
@@ -101,7 +106,7 @@ class TacticalScene:
             if self._enemy_edit:
                 self._obstacle_edit = False
 
-        # new turn for testing
+        # new turn (testing)
         if event.type == pygame.KEYDOWN and event.key == pygame.K_n:
             self.player.actions_remaining = settings.ACTIONS_PER_TURN
             if self._selected:
@@ -112,29 +117,52 @@ class TacticalScene:
             if self._selected and self._planned_path and not self.player.is_moving():
                 self._confirm_plan()
 
-        # FIRE!
+        # FIRE (consumes 1 action + 1 ammo if LoS exists)
         if event.type == pygame.KEYDOWN and event.key == pygame.K_f:
             enemy = self._enemy_under_mouse()
             if enemy and (enemy.col, enemy.row) in self._visible:
-                res = resolve_shot(self.grid, (self.player.col, self.player.row), (enemy.col, enemy.row), self._rng)
-                if res.outcome in ("hit", "crit", "graze") and res.damage > 0:
-                    enemy.apply_damage(res.damage)
-                    if enemy.is_dead():
-                        del self._enemies[(enemy.col, enemy.row)]
-                # Last-shot HUD line
-                self._last_shot_text = self._format_last_shot(res)
+                shooter = (self.player.col, self.player.row)
+                target = (enemy.col, enemy.row)
+                pv = preview_probabilities(self.grid, shooter, target, weapon=self.weapon)
+                if not pv.los:
+                    self._last_shot_text = "Last Shot: Blocked"
+                elif self.player.actions_remaining < getattr(settings, "FIRE_ACTION_COST", 1):
+                    self._last_shot_text = "Last Shot: Not enough actions"
+                elif not self.weapon.can_fire():
+                    self._last_shot_text = "Last Shot: Out of ammo (press R to reload)"
+                else:
+                    # consume action + ammo, then resolve
+                    self.player.actions_remaining -= getattr(settings, "FIRE_ACTION_COST", 1)
+                    self.weapon.consume_round(1)
+                    res = resolve_shot(self.grid, shooter, target, self._rng, weapon=self.weapon)
+                    if res.outcome in ("hit", "crit", "graze") and res.damage > 0:
+                        enemy.apply_damage(res.damage)
+                        if enemy.is_dead():
+                            del self._enemies[target]
+                    self._last_shot_text = self._format_last_shot(res)
+
+        # Reload (consumes 1 action if not full)
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+            if self.weapon.ammo >= self.weapon.mag_size:
+                self._last_shot_text = "Reload: magazine already full"
+            elif self.player.actions_remaining < getattr(settings, "RELOAD_ACTION_COST", 1):
+                self._last_shot_text = "Reload: not enough actions"
+            else:
+                self.player.actions_remaining -= getattr(settings, "RELOAD_ACTION_COST", 1)
+                self.weapon.reload_full()
+                self._last_shot_text = f"Reloaded {self.weapon.name}"
 
         # cancel plan
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             self._clear_plan()
 
         # camera drag
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button in settings.MOUSE_DRAG_BUTTONS:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button in getattr(settings, "MOUSE_DRAG_BUTTONS", (2,)):
             self._dragging = True
             self._drag_start_screen = event.pos
             self._drag_start_offset = (self.camera.offset_x, self.camera.offset_y)
 
-        if event.type == pygame.MOUSEBUTTONUP and event.button in settings.MOUSE_DRAG_BUTTONS:
+        if event.type == pygame.MOUSEBUTTONUP and event.button in getattr(settings, "MOUSE_DRAG_BUTTONS", (2,)):
             self._dragging = False
             self._drag_start_screen = None
             self._drag_start_offset = None
@@ -445,7 +473,11 @@ class TacticalScene:
 
     # ---- HUD ----
     def _draw_hud(self, surface: pygame.Surface) -> None:
-        pieces = [f"Actions: {self.player.actions_remaining}/{settings.ACTIONS_PER_TURN}"]
+        pieces = [
+            f"Actions: {self.player.actions_remaining}/{settings.ACTIONS_PER_TURN}",
+            f"Weapon: {self.weapon.name} {self.weapon.ammo}/{self.weapon.mag_size}",
+            "(F fire, R reload)"
+        ]
         if self._obstacle_edit:
             pieces.append("Obstacle Edit (O) | Shift+O demo | LMB toggle")
         if self._enemy_edit:
@@ -469,7 +501,7 @@ class TacticalScene:
                 if actions is not None:
                     pieces.append(f"Hover: {'1A' if actions == 1 else '2A Dash'} · {cost} tiles")
 
-        # LoF / Flank / Dist vs hovered enemy
+        # LoF / Flank / Dist vs hovered enemy (old HUD goodness)
         enemy = self._enemy_under_mouse()
         if enemy and (enemy.col, enemy.row) in self._visible:
             shooter = (self.player.col, self.player.row)
@@ -486,14 +518,14 @@ class TacticalScene:
                 f"| Dist: {dist}"
             )
 
-            # Hit% breakdown (compute_hit) + dmg ranges (preview_probabilities)
+            # Hit% breakdown (compute_hit) + weapon-aware dmg ranges (preview_probabilities)
             bd = compute_hit(self.grid, shooter, target, base_aim=settings.BASE_AIM_PERCENT)
             if not bd.los:
                 pieces.append("Shot: Blocked")
             else:
                 term_txt = ", ".join([f"{'+' if v>=0 else ''}{v} {k}" for k, v in bd.terms]) if bd.terms else "no mods"
                 pieces.append(f"Hit {bd.total}% ({bd.base} base{', ' + term_txt if term_txt else ''})")
-                pv = preview_probabilities(self.grid, shooter, target)
+                pv = preview_probabilities(self.grid, shooter, target, weapon=self.weapon)
                 pieces.append(
                     f"Damage Preview: Hit {pv.hit_chance}% | Crit {pv.crit_chance}% | Graze +{pv.graze_band}% "
                     f"| Base {pv.dmg_base_min}-{pv.dmg_base_max} (Graze {pv.dmg_graze_min}-{pv.dmg_graze_max}, Crit {pv.dmg_crit_min}-{pv.dmg_crit_max})"
@@ -517,7 +549,7 @@ class TacticalScene:
     def _format_last_shot(self, res) -> str:
         if res.outcome == "blocked":
             return "Last Shot: Blocked"
-        return f"Last Shot: {res.outcome.upper()} (roll {res.roll} ≤ hit {res.hit_chance}%{' / crit ' + str(res.crit_chance) + '%' if res.crit_chance else ''}) → {res.damage} dmg"
+        return f"Last Shot: {res.outcome.upper()} (roll {res.roll} / hit {res.hit_chance}%{' / crit ' + str(res.crit_chance) + '%' if res.crit_chance else ''}) → {res.damage} dmg"
 
     # ---- Demo helper ----
     def _seed_demo_obstacles(self) -> None:
