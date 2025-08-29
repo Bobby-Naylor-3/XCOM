@@ -56,3 +56,19 @@ ACTIONS_PER_TURN: int = 2
 
 # Movement speed (tiles per second)
 PLAYER_MOVE_SPEED_TPS: float = 8.0
+
+# Obstacles (render)
+OBSTACLE_RGBA: tuple[int, int, int, int] = (160, 40, 40, 160)  # filled red-ish w/ alpha
+OBSTACLE_BORDER_RGB: tuple[int, int, int] = (220, 80, 80)
+
+# HUD hint when editing obstacles
+OBSTACLE_EDIT_HINT_RGBA: tuple[int, int, int, int] = (30, 30, 30, 180)
+
+# Cover visuals
+COVER_FULL_RGB: tuple[int, int, int] = (80, 220, 120)      # full (XCOM: green-ish)
+COVER_HALF_RGB: tuple[int, int, int] = (255, 220, 0)       # half (XCOM: yellow-ish)
+COVER_DIM_RGB:  tuple[int, int, int] = (160, 160, 160)     # dim for non-focused tiles
+COVER_ALPHA:    int = 220
+COVER_MARGIN:   int = 6     # inset from tile edge (px)
+COVER_THICK:    int = 6     # thickness of the pip polygon (px)
+COVER_OOB_IS_FULL: bool = True  # treat map edge as full cover on that side

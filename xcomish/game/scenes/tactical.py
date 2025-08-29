@@ -13,7 +13,7 @@ Coord = tuple[int, int]
 
 @dataclass
 class TacticalScene:
-    """Tactical layer: select, preview ranges/paths, plan, confirm to animate & consume actions."""
+    """Tactical layer: select, plan, confirm moves, and live obstacle editing."""
     screen: pygame.Surface
     grid: Grid = field(default_factory=Grid)
     player: Player = field(init=False)
@@ -29,10 +29,13 @@ class TacticalScene:
     _range_costs: dict[Coord, int] = field(default_factory=dict, init=False)
     _range_parents: dict[Coord, Coord] = field(default_factory=dict, init=False)
 
-    # planned destination (no movement until confirmed)
+    # planned destination
     _planned_target: Coord | None = field(default=None, init=False)
     _planned_path: list[Coord] = field(default_factory=list, init=False)
     _planned_actions: int | None = field(default=None, init=False)
+
+    # obstacle edit mode
+    _obstacle_edit: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.player = Player(self.grid)
@@ -53,22 +56,30 @@ class TacticalScene:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             pygame.event.post(pygame.event.Event(pygame.QUIT))
 
-        # test helper: new turn (refill actions + recompute ranges if selected)
+        # toggle obstacle edit
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_o:
+            mods = pygame.key.get_mods()
+            if mods & pygame.KMOD_SHIFT:
+                self._seed_demo_obstacles()
+            else:
+                self._obstacle_edit = not self._obstacle_edit
+
+        # new turn for testing
         if event.type == pygame.KEYDOWN and event.key == pygame.K_n:
             self.player.actions_remaining = settings.ACTIONS_PER_TURN
             if self._selected:
                 self._compute_ranges(force=True)
 
-        # confirm move: Enter / Space (only if we have a plan and not moving)
+        # confirm move
         if event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE):
             if self._selected and self._planned_path and not self.player.is_moving():
                 self._confirm_plan()
 
-        # right-click cancels plan
+        # cancel plan
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             self._clear_plan()
 
-        # camera drag (middle or right — keep right for pan + plan cancel via key)
+        # camera drag
         if event.type == pygame.MOUSEBUTTONDOWN and event.button in settings.MOUSE_DRAG_BUTTONS:
             self._dragging = True
             self._drag_start_screen = event.pos
@@ -86,13 +97,22 @@ class TacticalScene:
             dx, dy = (mx - sx), (my - sy)
             self.camera.set_offset(ox0 - dx, oy0 - dy)
 
-        # left-click: select/deselect or set plan (disabled while moving)
+        # left-click
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not self.player.is_moving():
             world_x, world_y = self.camera.screen_to_world(*event.pos)
             col, row = self.grid.from_px(world_x, world_y)
 
+            if self._obstacle_edit:
+                # don't allow blocking the player's current tile
+                if (col, row) != (self.player.col, self.player.row):
+                    self.grid.toggle_obstacle(col, row)
+                    # re-evaluate ranges/plan if affected
+                    if self._selected:
+                        self._compute_ranges(force=True)
+                return
+
+            # selection / planning
             if (col, row) == (self.player.col, self.player.row):
-                # toggle selection
                 if not self._selected:
                     self._selected = True
                     self._compute_ranges()
@@ -116,9 +136,8 @@ class TacticalScene:
         start: Coord = (self.player.col, self.player.row)
 
         def passable(c: int, r: int) -> bool:
-            return self.grid.in_bounds(c, r)  # later: obstacles
+            return self.grid.is_passable(c, r)  # <-- obstacles respected
 
-        # respect remaining actions
         if self.player.actions_remaining <= 0:
             self._range_costs, self._range_parents = {start: 0}, {}
             return
@@ -126,7 +145,6 @@ class TacticalScene:
         max_cost = settings.MOVE_RANGE_1 if self.player.actions_remaining == 1 else settings.MOVE_RANGE_2
         self._range_costs, self._range_parents = flood_fill(start, passable, max_cost)
         if force:
-            # keep current plan if still valid; otherwise clear it
             if self._planned_target and self._planned_target not in self._range_costs:
                 self._clear_plan()
 
@@ -140,15 +158,22 @@ class TacticalScene:
         return None
 
     def _try_set_plan(self, target: Coord) -> None:
+        # cannot plan onto a blocked tile
+        if not self.grid.is_passable(*target):
+            self._clear_plan()
+            return
+
         cost = self._range_costs.get(target)
         actions = self._actions_for_cost(cost)
         if actions is None:
             self._clear_plan()
             return
+
         path = reconstruct_path(target, self._range_parents)
         if not path:
             self._clear_plan()
             return
+
         self._planned_target = target
         self._planned_path = path
         self._planned_actions = actions
@@ -159,13 +184,10 @@ class TacticalScene:
         self._planned_actions = None
 
     def _confirm_plan(self) -> None:
-        """Consume actions and start movement animation along the planned path."""
         if not self._planned_path or self._planned_actions is None:
             return
         if self._planned_actions > self.player.actions_remaining:
-            # not enough actions → ignore
             return
-        # pay actions up front and go
         self.player.actions_remaining -= self._planned_actions
         self.player.start_move(self._planned_path, settings.PLAYER_MOVE_SPEED_TPS)
 
@@ -181,12 +203,10 @@ class TacticalScene:
             speed = settings.CAMERA_PAN_SPEED * (settings.CAMERA_FAST_MULT if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 1.0)
             self.camera.move(nx * speed * dt, ny * speed * dt)
 
-        # update player animation
+        # update movement
         was_moving = self.player.is_moving()
         self.player.update(dt)
         now_moving = self.player.is_moving()
-
-        # when movement finishes, clear plan and recompute ranges (respect remaining actions)
         if was_moving and not now_moving:
             self._clear_plan()
             if self._selected:
@@ -196,6 +216,7 @@ class TacticalScene:
     def draw(self, surface: pygame.Surface, alpha: float) -> None:
         surface.fill(settings.BG_COLOR)
         self.grid.draw_lines(surface, self.camera)
+        self.grid.draw_obstacles(surface, self.camera)  # <--- NEW (under overlays)
 
         # range overlays (hide while moving)
         if self._selected and self._range_costs and not self.player.is_moving():
@@ -206,11 +227,11 @@ class TacticalScene:
         if self._selected:
             self.player.draw_selected(surface, self.camera, alpha=alpha)
 
-        # planned path (if not moving yet)
+        # planned path
         if self._selected and self._planned_path and not self.player.is_moving():
             self._draw_planned_path(surface)
 
-        # hover path on top (only when not moving)
+        # hover path
         if self._selected and self._range_costs and not self.player.is_moving():
             self._draw_hover_path(surface)
 
@@ -264,12 +285,13 @@ class TacticalScene:
         surface.blit(overlay, (0, 0))
 
     def _draw_action_hud(self, surface: pygame.Surface) -> None:
-        # base text: actions remaining
+        # base text
         text = f"Actions: {self.player.actions_remaining}/{settings.ACTIONS_PER_TURN}"
-
-        # plan/hover info
         extra = None
-        if not self.player.is_moving():
+
+        if self._obstacle_edit:
+            extra = "Obstacle Edit Mode (O to toggle, Shift+O demo wall)   |   LMB: toggle obstacle"
+        elif not self.player.is_moving():
             if self._planned_actions is not None and self._planned_path:
                 steps = max(0, len(self._planned_path) - 1)
                 extra = f"Planned: {'1 Action' if self._planned_actions == 1 else '2 Actions (Dash)'} · {steps} tiles (Enter/Space to confirm)"
@@ -289,6 +311,19 @@ class TacticalScene:
         surf_text = self._font.render(text, True, settings.HUD_TEXT_RGB)
         w, h = surf_text.get_size()
         pill = pygame.Surface((w + pad * 2, h + pad * 2), pygame.SRCALPHA)
-        pill.fill(settings.HUD_BG_RGBA)
+        pill.fill(settings.HUD_BG_RGBA if not self._obstacle_edit else settings.OBSTACLE_EDIT_HINT_RGBA)
         pill.blit(surf_text, (pad, pad))
         surface.blit(pill, (10, 10))
+
+    # ---- Demo helper ----
+    def _seed_demo_obstacles(self) -> None:
+        """Drop a small test wall ahead of the player (Shift+O)."""
+        base_c, base_r = self.player.col + 4, self.player.row
+        length = 10
+        for i in range(length):
+            c = base_c + i
+            r = base_r + (i % 2)  # slight jag so hover path shows detours
+            if self.grid.in_bounds(c, r) and (c, r) != (self.player.col, self.player.row):
+                self.grid.blocked.add((c, r))
+        if self._selected:
+            self._compute_ranges(force=True)
